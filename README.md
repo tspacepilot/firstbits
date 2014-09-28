@@ -7,9 +7,9 @@ daemon and query scripts to create, update, query the firstbits for a bitcoin ad
  * Reads data from a bitcoind instance and inserts it into a mysql db
  * currently requires a lot of memory!
  * python dependencies:
-   ** python2.7
-   ** mysql.connector
-   ** time, requests, json, datetime
+   * python2.7
+   * mysql.connector
+   * time, requests, json, datetime
 
 To run:
 
