@@ -1,0 +1,475 @@
+#!/usr/bin/env python2.7
+
+from __future__ import print_function
+import mysql.connector
+import sys 
+import time, requests, json, datetime
+
+DB_NAME = 'firstbits'
+ER_BAD_DB_ERROR = 1049
+ER_TABLE_EXISTS_ERROR = 1050
+ER_DUP_ENTRY = 1062
+
+class FirstBitsTree:
+  """Class to sort addresses into a tree structure for easy fb calculation
+       * The tree root (this class) just hold the first meaningful generation
+       * The nodes below it sort previously seen addresses by character
+         ie, to find an address starting with 1bt, take the 1 node, then the b
+         node then the t node ...
+       * Each node therefore represents a potential firstbits, if an address exists
+         which owns the firstbits of a node, it's info (full addy and height) will
+         be in the data fields of that node"""
+  children = {}
+  def __init__(self):
+    self.children = {} 
+
+  def insert_address_block(self, addresses, h):
+    """insert a list of addresses with the same height
+       the trick is to compute fbmin right here (against its own generation)
+       then pass it down"""
+    replies = {}
+    for a in addresses: 
+      fbmin = 1
+      for x in addresses: 
+        if a != x:
+          while a[:fbmin].lower() == x[:fbmin].lower():
+            fbmin+=1
+        
+      replies[a] = self.insert_address(a, h, fbmin=fbmin)
+    return replies
+      
+
+  def insert_address(self, address, height,fbmin=None):
+    """method to insert an address in the tree
+       should always return the firstbits"""
+    
+    # check the first (lowercase) char of address
+    # if an appropriate child exists, call insert on that node
+    # if not, create the node and we're done
+
+
+    k = address[0].lower()
+    if k in self.children:
+      return self.children[k].insert_address(address, height, fbmin)
+    else:
+      self.children[k] = FBNode(k, a=address, h=height)
+      return address[:max(1,fbmin)].lower()
+      
+
+
+class FBNode:
+  """Class which holds:
+       * a firstbits
+       * possibly an address and height (if this firstbits is used)
+       * child nodes as necessary"""
+  address = None 
+  height  = -1
+  firstbits = None 
+  children = {}
+
+  def __init__(self, fb, a=None, h=None, fbmin=None):
+    self.address=a
+    self.height=h
+    self.firstbits=fb
+    if fbmin != None:
+      if fbmin < len(self.firstbits):
+        k = a[:len(self.firstbits)+1].lower()
+        self.children[k] = FBNode(k, a=a, h=h, fbmin=fbmin)
+
+  def insert_address(self, a, h, fbmin=None):
+    ## when you get an fbmin, you can't stop recursing until 
+    ## fbmin == len(self.firstbits)
+    ## and! you always have to try to lengthen fbmin if this node has an address
+
+    if self.address != None:
+      if a == self.address:
+        # print("dup",a)
+        return None
+      while a[:fbmin].lower() == self.address[:fbmin].lower():
+        fbmin+=1
+
+    k = a[:len(self.firstbits)+1].lower()
+    if k in self.children:
+      return self.children[k].insert_address(a,h,fbmin=fbmin) 
+    else:
+      self.children[k] = FBNode(k, a=a, h=h, fbmin=fbmin)
+      return a[:max(len(self.firstbits)+1,fbmin)].lower()
+
+
+class RPCHost(object):
+  def __init__(self, url):
+    self._session = requests.Session()
+    self._url = url
+    self._headers = {'content-type': 'application/json'}
+  def call(self, rpcMethod, *params):
+    payload = json.dumps({"method": rpcMethod, 
+                          "params": list(params), "jsonrpc": "2.0"})
+    tries = 10
+    hadConnectionFailures = False
+    while True:
+      try:
+        response = self._session.get(self._url, headers=self._headers, data=payload)
+      except requests.exceptions.ConnectionError:
+        tries -= 1
+        if tries == 0:
+          raise Exception('Failed to connect for remote procedure call.')
+        hadFailedConnections = True
+        print("Couldn't connect for remote procedure call,"+\
+              " will sleep for ten seconds and then try again"+\
+              " ({} more tries)".format(tries))
+        time.sleep(10)
+      else:
+        if hadConnectionFailures:
+          print('Connected for remote procedure call after retry.')
+        break
+    if not response.status_code in (200, 500):
+      raise Exception('RPC connection failure: ' +\
+                       str(response.status_code) +\
+                      ' ' + response.reason)
+    responseJSON = response.json()
+    if 'error' in responseJSON and responseJSON['error'] != None:
+      raise Exception('Error in RPC call: ' + str(responseJSON['error']))
+    return responseJSON['result']
+
+def get_addresses(host, txid):
+  '''given a txid, get return addresses (as a list) from each output in the tx'''
+  o_exceptions=0
+  try:
+    txobj = host.call('getrawtransaction', txid, 1)
+  except Exception as e:
+    print(e, file=sys.stderr)
+    return None
+  else:
+    vout = txobj['vout']
+    # print("number of outputs",len(vout), file=sys.stderr)
+    ads = []
+    for o in vout:
+      if o['scriptPubKey']['asm']=="OP_RETURN":
+        # invalid output
+        continue
+      else:
+        try:
+          ad = o['scriptPubKey']['addresses']
+          ads.append(ad)
+        except Exception as e:
+          # print(txobj,file=sys.stderr)
+          # print(vout,file=sys.stderr)
+          # print(o,file=sys.stderr)
+          # print(e,file=sys.stderr)
+          o_exceptions+=1
+         # print("number of addresses in this output",len(ads),file=sys.stderr)
+    return [o_exceptions, ads]
+
+def get_tx_from_block(host, blockheight):
+  '''return a list of transactions found in a block at a given
+     height'''
+  return host.call('getblock', host.call('getblockhash', blockheight))['tx']
+
+
+
+def get_addresses(host, txid):
+  '''given a txid, get return addresses (as a list) from each output in the tx'''
+
+  o_exceptions=0
+  try:
+    txobj = host.call('getrawtransaction', txid, 1)
+  except Exception as e:
+    print(e, file=sys.stderr)
+    return None
+  else:
+    vout = txobj['vout']
+    # print("number of outputs",len(vout), file=sys.stderr)
+    ads = []
+    for o in vout:
+      if o['scriptPubKey']['asm']=="OP_RETURN":
+        # invalid output
+        continue
+      else:
+        try:
+          ad = o['scriptPubKey']['addresses']
+          ads.append(ad)
+        except Exception as e:
+          # print(txobj,file=sys.stderr)
+          # print(vout,file=sys.stderr)
+          # print(o,file=sys.stderr)
+          # print(e,file=sys.stderr)
+          o_exceptions+=1
+         # print("number of addresses in this output",len(ads),file=sys.stderr)
+    return [o_exceptions, ads]
+
+
+def insert_addresses_to_mysql(cnx, cursor, fbinsertdata):
+  for row in fbinsertdata:
+    try:
+      a = row[0]
+      fb= row[1]
+      h = row[2]
+      cursor.execute("INSERT INTO main "+\
+                     "(address, firstbits, height) "+\
+                     "VALUES (%(ad)s, %(fb)s, %(h)s)",
+                     {'ad':a, 'fb':fb, 'h':h})
+    except Exception as err:
+      if err.errno == ER_DUP_ENTRY:
+        print("skipping entry already in db", file=sys.stderr)
+        print(row,file=sys.stderr)
+      else: 
+        print(err,file=sys.stderr)
+        sys.exit(1)
+  cnx.commit()
+
+
+def update_fbt(fbt, cnx, cursor, blocknum):
+  '''given a mysql connection, get addresses from block and stick them in
+     fbt'''
+  if blocknum == 0:
+    fbt.insert_address(fbtable_init(testnet=False)[0][0],blocknum)
+  else:
+    cursor.execute("SELECT address FROM main WHERE height=%d" %blocknum) 
+    ads = [t[0] for t in cursor.fetchall()]
+    reply = fbt.insert_address_block(ads,blocknum)
+    #for r in reply:
+    #  print(r,reply[r],blocknum)
+
+def update_firstbits(fbt, cnx, cursor, host, mysql_h):
+  '''given a firstbitstree, a cursor with access to the mysql firstbits db 
+     and a host
+     which is connected to bitcoind, update mysql table to the next block,
+     return the updated block height'''
+  ### 
+  if mysql_h == None:
+    ## initialize and return
+    update_fbt(fbt,cnx,cursor,0)
+    insert_addresses_to_mysql(cnx, cursor, fbtable_init())
+    return 0
+
+  else:
+    ## get the transactions from block at mysql_h+1
+    # print("getting tx from block via rpc call",file=sys.stderr)
+    txlist = get_tx_from_block(host, mysql_h+1)
+    ads_this_block = set()
+    # ads_to_date = fbtable_getcol(fbtable, 0)
+
+    # how many outputs, transactions, had no addresses 
+    o_exceptions = 0
+    tx_exceptions = 0
+    emptyads = 0
+
+    for tx in txlist:
+      # print("querying for transaction:",tx, file=sys.stderr)
+      [o_e, ads] = get_addresses(host, tx)
+      o_exceptions+=o_e 
+      if ads == None:
+        tx_exceptions+=1
+        # ads_this_block.extend([])
+      elif len(ads) > 0:
+        ## got some new addresses
+        for alist in ads:
+          for a in alist: 
+            ads_this_block.add(a)
+      else: 
+        emptyads+=1
+
+
+    # print("unique addresses this block",len(ads_this_block))
+    # print("doing insert into fbt",file=sys.stderr)
+    reply_dict = fbt.insert_address_block(ads_this_block,mysql_h+1)
+    fbtable_insert_data = [ [r, reply_dict[r], mysql_h+1] for r in reply_dict if reply_dict[r] != None ]
+    insert_addresses_to_mysql(cnx,cursor,fbtable_insert_data)
+    return mysql_h+1
+
+    # prev_adds = fbtable_getcol(fbtable, 0)
+
+    # compute the firstbits
+
+    # for each ad 
+#    print("  there are",len(ads_this_block),"unique addresses in this block")
+#    counter=0
+#    fbtable_insert_data = []
+#    cursor.execute("SELECT address FROM main")
+#    previous_ads = [ tup[0] for tup in cursor.fetchall()]
+#    for ad in ads_this_block:
+#      # if ad is already in fbtable, skip it
+#      if ad in previous_ads:
+#        continue
+#
+#      # lower case it
+#      a = ad.lower()
+#      # init fblen at 1
+#      fblen = 1
+#      ## increase fblen while mysql returns a non-empty set
+#      # cursor.execute("SELECT * from main WHERE firstbits LIKE '"+\
+#      #                a[:fblen]+"%'")
+#      # reply = cursor.fetchall()
+#      # while reply != []:
+#      for xUP in previous_ads:
+#        x = xUP.lower()
+#        while a[:fblen] == x[:fblen]: 
+#          fblen+=1
+#          #cursor.execute("SELECT * from main WHERE "+\
+#          #               "firstbits LIKE '"+a[:fblen]+"%'")
+#          #reply = cursor.fetchall()
+#          fblen+=1
+#          # sanity check
+#          if fblen>64:
+#            print("fblen blew up! :(",fblen)
+#            print(ad,xUP)
+#            print(previous_adds)
+#            print(new_addresses)
+#            print(fbtable)
+#            sys.exit(1)
+#          
+#
+#      # now need to check against this generation
+#      for xUP in ads_this_block: 
+#        x = xUP.lower()
+#        if a != x:
+#          # don't compare against yourself!
+#          while a[:fblen] == x[:fblen]:
+#            fblen+=1
+#      # that should do it!
+#      fbtable_insert_data.append([ad,a[:fblen],mysql_h+1])
+#      counter+=1
+#      #print("data to insert updated ("+str(counter)+")\n  ",
+#      #      ad,a[:fblen],mysql_h+1,file=sys.stderr)
+
+
+def fbtable_init(testnet=True):
+  '''create a starter fb with the gensis address hardcoded
+
+     this init also means that the update method is cleaner---no worrying about
+     the case where things are empty.
+  '''
+  if testnet:
+    return [ [ u'mpXwg4jMtRhuSpVq4xS3HFHmCmWp9NyGKt', u'm', 0 ] ]
+  else:
+    return [ [ u'1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', u'1', 0 ] ]
+
+
+def fbtable_getcol(fbtable, n):
+  '''a lambda function to get the nth column from the fbtable and 
+     return it as a list'''
+
+  col = lambda x: [ r[x] for r in fbtable ]
+  return col(n)
+
+
+def create_host(rpcUser,rpcPassword,rpcPort):
+  ## default port for bitcoin testnet
+  ## (change to 8332 for 'main net')
+
+  serverURL = 'http://' + rpcUser + ':' +\
+                          rpcPassword + '@localhost:' + str(rpcPort)
+  host = RPCHost(serverURL)
+  print("bitcoind host created",file=sys.stderr)
+  return host
+
+
+def create_database(cursor):
+  try:
+    cursor.execute(
+        "CREATE DATABASE {} DEFAULT CHARACTER SET 'utf8'".format(DB_NAME))
+  except mysql.connector.Error as err:
+    print("Failed creating database: {}".format(err))
+    exit(1)
+
+
+if __name__ in "__main__":
+    """firstbits daemon, should do the following:
+       1. try to open a connection to a mysql server and see if there's a
+          firstbits db existing 
+          -- if not, create it
+          -- if yes, get the latest block number
+       2. see if there's a bitcoind instance running
+          -- if not, exit
+          -- if so, get the latest block number
+       3. while db-height < blockchain-height: get addreses and update db
+       4. sleep for 5 mins and then return to (3)"""
+
+    # step 0, read the config info
+    try:
+      config_lines = open(sys.argv[1]).readlines()
+      config_dict = dict([l.strip().split('=') for l in config_lines])
+      print(config_dict)
+    except:
+      print("failed to read info from config file",sys.argv[1],file=sys.stderr)
+      sys.exit(1)
+
+
+    # step 1, connect to mysql
+    cnx = mysql.connector.connect(user=config_dict['mysqluser'],
+                                  password=config_dict['mysqlpassword'], 
+                                  host=config_dict['mysqlhost'])
+
+    cursor = cnx.cursor()
+    print("mysql connection established",file=sys.stderr)
+    try:
+        print("try to set db name", file=sys.stderr)
+        cnx.database = DB_NAME
+    except mysql.connector.Error as err:
+        if err.errno == ER_BAD_DB_ERROR:
+            print(err, file=sys.stderr)
+            print("try to create mysql db", file=sys.stderr)
+            create_database(cursor)
+            cnx.database = DB_NAME
+            print("...db creation ok!",file=sys.stderr)
+            try:
+                print("creating main table", file=sys.stderr)
+                cursor.execute("CREATE TABLE `main`("+\
+                               "`id` int(16) NOT NULL AUTO_INCREMENT,"+\
+                               "`address` varchar(64) NOT NULL,"+\
+                               "`firstbits` varchar(64) NOT NULL,"+\
+                               "`height` int(16) NOT NULL,"+\
+                               " PRIMARY KEY (`id`),"+\
+                               " UNIQUE (`address` ),"+\
+                               " UNIQUE (`firstbits`) )" )
+            except mysql.connector.Error as err:
+                if err.errno == ER_TABLE_EXISTS_ERROR:
+                    print("table already exists",file=sys.stderr)
+                else:
+                    print(err,file=sys.stderr)
+                    sys.exit(1)
+
+    # all connected, see what the latest block is in the db
+    cursor.execute("SELECT MAX(height) AS height FROM main")
+    mysql_h = cursor.fetchall()[0][0]
+    print("mysql firstbits table exists, synced to height", mysql_h, 
+          file=sys.stderr)
+
+
+    # create a tree object and insert all data from mysql 
+    fbt = FirstBitsTree()
+    fbtinsert = 0
+    while fbtinsert < mysql_h:
+      update_fbt(fbt,cnx,cursor,fbtinsert)
+      print("fbtree updated to gen",fbtinsert,file=sys.stderr)
+      fbtinsert+=1
+    
+    print("fbt initialized to mysql height",mysql_h)
+
+    # step 2, connect to bitcoind
+    # TODO, try to read ~/.bitcoin/bitcoin.conf, and override with args
+    # TODO: should we be using ssl for the password?
+
+    ## create host
+    rpcUser = config_dict['rpcuser']
+    rpcPassword = config_dict['rpcpassword'] 
+    rpcPort = config_dict['rpcport'] 
+    host = create_host(rpcUser,rpcPassword,rpcPort)
+    
+    ## get the blockchain height 
+    blckchn_h = host.call('getblockcount') 
+    print("blockchain height",blckchn_h,file=sys.stderr)
+
+    while True:
+    ## if the table is behind the blockchain, update
+      ## step 3, loop to sync with block
+      while mysql_h < blckchn_h:
+        mysql_h = update_firstbits(fbt, cnx, cursor, host, mysql_h)  
+        if mysql_h%100==0: 
+          print("firstbits db synced to block",mysql_h)
+
+      ## step 4, sleep and check again
+      time.sleep(5*60)
+      blckchn_h = host.call('getblockcount') 
+      # print("blockchain height",blckchn_h,file=sys.stderr)
+
