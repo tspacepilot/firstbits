@@ -28,4 +28,4 @@ rpcpassword=BITCOINDRPCPASS
 rpcport=8332
 ```
 
-More info soon!
+Note that your bitcoind instance needs to be running with `-txindex=1`.

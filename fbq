@@ -3,12 +3,8 @@
 
 
 import mysql.connector
-
-cnx = mysql.connector.connect(user='root', 
-                              password='mysqlroot', 
-                              host='localhost',
-                              database='firstbits3')
-cursor = cnx.cursor()
+import getopt
+import sys
 
 def ad2fb(cursor,ad):
   cursor.execute("SELECT * FROM main WHERE address='%s';" % ad)
@@ -22,13 +18,45 @@ def fb2ad(cursor,fb):
   if reply:
     print("address: {0}\nfirstbits: {1}\nheight: {2}".format(reply[1], reply[2], reply[3]))
 
-import sys
-if sys.argv[1] == '-fb':
-  fb2ad(cursor, sys.argv[2])
-elif sys.argv[1] == '-ad':
-  ad2fb(cursor, sys.argv[2])
-else:
-  print("error, give an fb or an ad with -fb FB or -ad AD")
+
+try:
+  opts, args = getopt.getopt(sys.argv[1:],"f:a:c:",["firstbits=","address=","config="])
+except getopt.GetoptError as err:
+  print(str(err),file=sys.stderr)
+  usage()
+  sys.exit(2)
+  
+for o,a in opts:
+  if o in ["-f","--firstbits"]:
+    request='f'
+    request_arg=a
+  elif o in ["-a","--address"]:
+    request='a'
+    request_arg=a
+  elif o in ["-c","--config"]:
+    conf=a
+  else:
+    assert False, "unhandled option"
+  
+try:
+  config_lines = open(conf).readlines()
+  config_dict = dict([l.strip().split('=') for l in config_lines])
+except:
+  print("failed to read info from config file",conf,file=sys.stderr)
+  sys.exit(1)
+
+cnx = mysql.connector.connect(user=config_dict['mysqluser'],
+                              password=config_dict['mysqlpassword'], 
+                              host=config_dict['mysqlhost'],
+                              database=config_dict['mysqldb'])
+
+cursor = cnx.cursor()
+
+
+if request == 'f':
+  fb2ad(cursor, request_arg)
+elif request == 'a':
+  ad2fb(cursor, request_arg)
 
 cursor.close()
 cnx.close()

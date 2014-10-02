@@ -389,7 +389,7 @@ if __name__ in "__main__":
     try:
       config_lines = open(sys.argv[1]).readlines()
       config_dict = dict([l.strip().split('=') for l in config_lines])
-      print(config_dict)
+      # print(config_dict)
     except:
       print("failed to read info from config file",sys.argv[1],file=sys.stderr)
       sys.exit(1)
@@ -404,6 +404,8 @@ if __name__ in "__main__":
     print("mysql connection established",file=sys.stderr)
     try:
         print("try to set db name", file=sys.stderr)
+        if 'mysqldb' in config_dict:
+          DB_NAME=config_dict['mysqldb']
         cnx.database = DB_NAME
     except mysql.connector.Error as err:
         if err.errno == ER_BAD_DB_ERROR:
