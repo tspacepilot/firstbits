@@ -24,7 +24,6 @@ try:
   opts, args = getopt.getopt(sys.argv[1:],"f:a:c:",["firstbits=","address=","config="])
 except getopt.GetoptError as err:
   print(str(err),file=sys.stderr)
-  usage()
   sys.exit(2)
   
 conf=None
