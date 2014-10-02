@@ -2,6 +2,7 @@
 # connect and serve a query to the firstbits db
 
 
+from __future__ import print_function
 import mysql.connector
 import getopt
 import sys
@@ -26,6 +27,9 @@ except getopt.GetoptError as err:
   usage()
   sys.exit(2)
   
+conf=None
+request=None
+request_arg=None
 for o,a in opts:
   if o in ["-f","--firstbits"]:
     request='f'
@@ -38,6 +42,10 @@ for o,a in opts:
   else:
     assert False, "unhandled option"
   
+if not conf:
+  print("need to pass a config file location with -c/--config",file=sys.stderr)
+  sys.exit(3)
+
 try:
   config_lines = open(conf).readlines()
   config_dict = dict([l.strip().split('=') for l in config_lines])
@@ -51,7 +59,6 @@ cnx = mysql.connector.connect(user=config_dict['mysqluser'],
                               database=config_dict['mysqldb'])
 
 cursor = cnx.cursor()
-
 
 if request == 'f':
   fb2ad(cursor, request_arg)
